@@ -27,11 +27,11 @@ class Validator(ABC):
         """A string representation of the args passed to this validator. Used by
         `__repr__`.
         """
-        pass
+        return ''
 
     @abstractmethod
     def __call__(self, value: typing.Any) -> typing.Any:
-        ...
+        raise NotImplementedError("Validator subclasses must implement __call__")
 
 class And(Validator):
     """Compose multiple validators and combine their error messages.
@@ -378,7 +378,13 @@ class OneOf(Validator):
             of an attribute of the choice objects. Defaults to `str()`
             or `str()`.
         """
-        pass
+        if callable(valuegetter):
+            getter = valuegetter
+        else:
+            getter = lambda x: getattr(x, valuegetter)
+
+        for choice, label in zip_longest(self.choices, self.labels):
+            yield getter(choice), label or str(choice)
 
 class ContainsOnly(OneOf):
     """Validator which succeeds if ``value`` is a sequence and each element
