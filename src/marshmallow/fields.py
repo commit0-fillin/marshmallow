@@ -507,7 +507,14 @@ class UUID(String):
 
     def _validated(self, value) -> uuid.UUID | None:
         """Format the value or raise a :exc:`ValidationError` if an error occurs."""
-        pass
+        if value is None:
+            return None
+        if isinstance(value, uuid.UUID):
+            return value
+        try:
+            return uuid.UUID(value)
+        except (ValueError, AttributeError, TypeError):
+            self.fail('invalid_uuid')
 
 class Number(Field):
     """Base class for number fields.
