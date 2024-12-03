@@ -34,7 +34,18 @@ def register(classname: str, cls: SchemaType) -> None:
         # }
 
     """
-    pass
+    global _registry
+    if classname in _registry and _registry[classname] != [cls]:
+        _registry[classname].append(cls)
+    else:
+        _registry[classname] = [cls]
+    
+    # Add the full, module-qualified path
+    full_path = f"{cls.__module__}.{cls.__name__}"
+    if full_path in _registry and _registry[full_path] != [cls]:
+        _registry[full_path].append(cls)
+    else:
+        _registry[full_path] = [cls]
 
 def get_class(classname: str, all: bool=False) -> list[SchemaType] | SchemaType:
     """Retrieve a class from the registry.
@@ -42,4 +53,18 @@ def get_class(classname: str, all: bool=False) -> list[SchemaType] | SchemaType:
     :raises: marshmallow.exceptions.RegistryError if the class cannot be found
         or if there are multiple entries for the given class name.
     """
-    pass
+    try:
+        classes = _registry[classname]
+    except KeyError:
+        raise RegistryError(f"Class with name {classname!r} was not found.")
+
+    if all:
+        return classes
+    
+    if len(classes) > 1:
+        raise RegistryError(
+            f"Multiple classes with name {classname!r} were found. "
+            "Please use the full, module-qualified path."
+        )
+    
+    return classes[0]
