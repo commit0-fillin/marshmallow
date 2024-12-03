@@ -138,19 +138,35 @@ class Field(FieldABC):
         :param callable accessor: A callable used to retrieve the value of `attr` from
             the object `obj`. Defaults to `marshmallow.utils.get_value`.
         """
-        pass
+        accessor_func = accessor or utils.get_value
+        return accessor_func(obj, attr, default)
 
     def _validate(self, value):
         """Perform validation on ``value``. Raise a :exc:`ValidationError` if validation
         does not succeed.
         """
-        pass
+        errors = []
+        for validator in self.validators:
+            try:
+                if validator(value) is False:
+                    self.fail('validator_failed')
+            except ValidationError as error:
+                errors.extend(error.messages)
+        if errors:
+            raise ValidationError(errors)
 
     def make_error(self, key: str, **kwargs) -> ValidationError:
         """Helper method to make a `ValidationError` with an error message
         from ``self.error_messages``.
         """
-        pass
+        try:
+            msg = self.error_messages[key]
+        except KeyError:
+            class_name = self.__class__.__name__
+            msg = MISSING_ERROR_MESSAGE.format(class_name=class_name, key=key)
+        if isinstance(msg, str):
+            msg = msg.format(**kwargs)
+        return ValidationError(msg)
 
     def fail(self, key: str, **kwargs):
         """Helper method that raises a `ValidationError` with an error message
@@ -159,13 +175,23 @@ class Field(FieldABC):
         .. deprecated:: 3.0.0
             Use `make_error <marshmallow.fields.Field.make_error>` instead.
         """
-        pass
+        warnings.warn(
+            "Field.fail is deprecated. Use Field.make_error instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        raise self.make_error(key, **kwargs)
 
     def _validate_missing(self, value):
         """Validate missing values. Raise a :exc:`ValidationError` if
         `value` should be considered missing.
         """
-        pass
+        if value is missing_:
+            if self.required:
+                raise self.make_error('required')
+        elif value is None:
+            if self.allow_none is False:
+                raise self.make_error('null')
 
     def serialize(self, attr: str, obj: typing.Any, accessor: typing.Callable[[typing.Any, str, typing.Any], typing.Any] | None=None, **kwargs):
         """Pulls the value for the given key from the object, applies the
@@ -176,7 +202,14 @@ class Field(FieldABC):
         :param accessor: Function used to access values from ``obj``.
         :param kwargs: Field-specific keyword arguments.
         """
-        pass
+        if self.dump_only:
+            return self.dump_default
+
+        value = self.get_value(obj, attr, accessor=accessor)
+        if value is missing_:
+            return self.dump_default if self.dump_default is not missing_ else None
+
+        return self._serialize(value, attr, obj, **kwargs)
 
     def deserialize(self, value: typing.Any, attr: str | None=None, data: typing.Mapping[str, typing.Any] | None=None, **kwargs):
         """Deserialize ``value``.
@@ -188,7 +221,16 @@ class Field(FieldABC):
         :raise ValidationError: If an invalid value is passed or if a required value
             is missing.
         """
-        pass
+        if self.load_only:
+            return self.load_default
+
+        self._validate_missing(value)
+        if value is missing_:
+            return self.load_default
+
+        value = self._deserialize(value, attr, data, **kwargs)
+        self._validate(value)
+        return value
 
     def _bind_to_schema(self, field_name, schema):
         """Update field with values from its parent schema. Called by
@@ -197,7 +239,13 @@ class Field(FieldABC):
         :param str field_name: Field name set in schema.
         :param Schema|Field schema: Parent object.
         """
-        pass
+        self.parent = self.schema = schema
+        self.name = field_name
+        self.root = schema.root
+        # Allow fields to override their data key
+        if self.data_key is None:
+            self.data_key = field_name
+        self.metadata.setdefault('data_key', self.data_key)
 
     def _serialize(self, value: typing.Any, attr: str | None, obj: typing.Any, **kwargs):
         """Serializes ``value`` to a basic Python datatype. Noop by default.
@@ -217,7 +265,7 @@ class Field(FieldABC):
         :param dict kwargs: Field-specific keyword arguments.
         :return: The serialized value
         """
-        pass
+        return value
 
     def _deserialize(self, value: typing.Any, attr: str | None, data: typing.Mapping[str, typing.Any] | None, **kwargs):
         """Deserialize value. Concrete :class:`Field` classes should implement this method.
@@ -235,12 +283,12 @@ class Field(FieldABC):
         .. versionchanged:: 3.0.0
             Added ``**kwargs`` to signature.
         """
-        pass
+        return value
 
     @property
     def context(self):
         """The context dictionary for the parent :class:`Schema`."""
-        pass
+        return self.parent.context if self.parent else {}
 
 class Raw(Field):
     """Field that applies no formatting."""
@@ -314,7 +362,32 @@ class Nested(Field):
         .. versionchanged:: 1.0.0
             Renamed from `serializer` to `schema`.
         """
-        pass
+        if not self._schema:
+            if isinstance(self.nested, SchemaABC):
+                self._schema = self.nested
+            elif isinstance(self.nested, type) and issubclass(self.nested, SchemaABC):
+                self._schema = self.nested(many=self.many, only=self.only, exclude=self.exclude,
+                                           context=self.context, load_only=self._nested_normalized_option('load_only'),
+                                           dump_only=self._nested_normalized_option('dump_only'))
+            elif isinstance(self.nested, dict):
+                self._schema = Schema.from_dict(self.nested,
+                                                many=self.many, only=self.only, exclude=self.exclude,
+                                                context=self.context, load_only=self._nested_normalized_option('load_only'),
+                                                dump_only=self._nested_normalized_option('dump_only'))
+            elif isinstance(self.nested, str):
+                if self.nested == 'self':
+                    parent_class = self.parent.__class__
+                    self._schema = parent_class(many=self.many, only=self.only, exclude=self.exclude,
+                                                context=self.context, load_only=self._nested_normalized_option('load_only'),
+                                                dump_only=self._nested_normalized_option('dump_only'))
+                else:
+                    schema_class = class_registry.get_class(self.nested)
+                    self._schema = schema_class(many=self.many, only=self.only, exclude=self.exclude,
+                                                context=self.context, load_only=self._nested_normalized_option('load_only'),
+                                                dump_only=self._nested_normalized_option('dump_only'))
+            else:
+                raise ValueError("Nested fields must be passed a Schema, not {}.".format(self.nested.__class__))
+        return self._schema
 
     def _deserialize(self, value, attr, data, partial=None, **kwargs):
         """Same as :meth:`Field._deserialize` with additional ``partial`` argument.
@@ -325,7 +398,9 @@ class Nested(Field):
         .. versionchanged:: 3.0.0
             Add ``partial`` parameter.
         """
-        pass
+        if self.many and not utils.is_collection(value):
+            self.fail('type', input=value, type=value.__class__.__name__)
+        return self.schema.load(value, unknown=self.unknown, partial=partial)
 
 class Pluck(Nested):
     """Allows you to replace nested data with one of the data's fields.
@@ -449,15 +524,27 @@ class Number(Field):
 
     def _format_num(self, value) -> typing.Any:
         """Return the number value for value, given this field's `num_type`."""
-        pass
+        if value is None:
+            return None
+        return self.num_type(value)
 
     def _validated(self, value) -> _T | None:
         """Format the value or raise a :exc:`ValidationError` if an error occurs."""
-        pass
+        if value is None:
+            return None
+        try:
+            return self.num_type(value)
+        except (TypeError, ValueError) as error:
+            self.fail('invalid')
 
     def _serialize(self, value, attr, obj, **kwargs) -> str | _T | None:
         """Return a string if `self.as_string=True`, otherwise return this field's `num_type`."""
-        pass
+        if value is None:
+            return None
+        num = self._format_num(value)
+        if self.as_string:
+            return str(num)
+        return num
 
 class Integer(Number):
     """An integer field.
@@ -532,6 +619,9 @@ class Decimal(Number):
         self.rounding = rounding
         self.allow_nan = allow_nan
         super().__init__(as_string=as_string, **kwargs)
+        if self.places is not None and 'precision' in kwargs:
+            raise ValueError("Cannot specify both `places` and `precision`.")
+        self.precision = kwargs.get('precision', None)
 
 class Boolean(Field):
     """A boolean field.
@@ -553,6 +643,8 @@ class Boolean(Field):
             self.truthy = set(truthy)
         if falsy is not None:
             self.falsy = set(falsy)
+        if self.load_default is missing_:
+            self.load_default = False
 
 class DateTime(Field):
     """A formatted datetime string.
@@ -578,7 +670,12 @@ class DateTime(Field):
 
     def __init__(self, format: str | None=None, **kwargs) -> None:
         super().__init__(**kwargs)
-        self.format = format
+        self.format = format or self.DEFAULT_FORMAT
+        if self.format not in self.SERIALIZATION_FUNCS:
+            raise ValueError(
+                f"Invalid format '{self.format}'. Supported formats are: "
+                f"{', '.join(self.SERIALIZATION_FUNCS.keys())}"
+            )
 
 class NaiveDateTime(DateTime):
     """A formatted naive datetime string.
