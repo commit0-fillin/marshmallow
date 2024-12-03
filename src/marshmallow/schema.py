@@ -26,7 +26,11 @@ def _get_fields(attrs):
 
     :param attrs: Mapping of class attributes
     """
-    pass
+    return [
+        (key, value)
+        for key, value in attrs.items()
+        if isinstance(value, Field)
+    ]
 
 def _get_fields_by_mro(klass):
     """Collect fields from a class, following its method resolution order. The
@@ -35,7 +39,17 @@ def _get_fields_by_mro(klass):
 
     :param type klass: Class whose fields to retrieve
     """
-    pass
+    declared_fields = []
+    for base_class in klass.__mro__[1:]:  # Skip the class itself
+        if hasattr(base_class, '_declared_fields'):
+            declared_fields.extend(base_class._declared_fields.items())
+        else:
+            declared_fields.extend(
+                (key, value)
+                for key, value in base_class.__dict__.items()
+                if isinstance(value, Field)
+            )
+    return declared_fields
 
 class SchemaMeta(ABCMeta):
     """Metaclass for the Schema class. Binds the declared fields to
@@ -77,7 +91,15 @@ class SchemaMeta(ABCMeta):
         :param inherited_fields: Inherited fields.
         :param dict_cls: dict-like class to use for dict output Default to ``dict``.
         """
-        pass
+        declared_fields = dict_cls()
+        for key, field in inherited_fields + cls_fields:
+            if field.dump_only:
+                field = field.__class__(dump_only=True)
+            field_copy = field.__deepcopy__()
+            field_copy.parent = klass
+            field_copy.name = key
+            declared_fields[key] = field_copy
+        return declared_fields
 
     def __init__(cls, name, bases, attrs):
         super().__init__(name, bases, attrs)
@@ -91,7 +113,16 @@ class SchemaMeta(ABCMeta):
         By doing this after constructing the class, we let standard inheritance
         do all the hard work.
         """
-        pass
+        hooks = {}
+        for attr_name in dir(cls):
+            attr_value = getattr(cls, attr_name)
+            if hasattr(attr_value, '__marshmallow_hook__'):
+                hook_config = attr_value.__marshmallow_hook__
+                for key, value in hook_config.items():
+                    if key not in hooks:
+                        hooks[key] = []
+                    hooks[key].append(attr_name)
+        return hooks
 
 class SchemaOpts:
     """class Meta options for the :class:`Schema`. Defines defaults."""
@@ -282,7 +313,10 @@ class Schema(base.SchemaABC, metaclass=SchemaMeta):
 
         .. versionadded:: 3.0.0
         """
-        pass
+        attrs = fields.copy()
+        attrs['Meta'] = type('Meta', (), {'register': False})
+        schema_cls = type(name, (cls,), attrs)
+        return schema_cls
 
     def handle_error(self, error: ValidationError, data: typing.Any, *, many: bool, **kwargs):
         """Custom error handler function for the schema.
@@ -297,7 +331,7 @@ class Schema(base.SchemaABC, metaclass=SchemaMeta):
         .. versionchanged:: 3.0.0rc9
             Receives `many` and `partial` (on deserialization) as keyword arguments.
         """
-        pass
+        pass  # Default implementation does nothing
 
     def get_attribute(self, obj: typing.Any, attr: str, default: typing.Any):
         """Defines how to pull values from an object to serialize.
@@ -307,7 +341,7 @@ class Schema(base.SchemaABC, metaclass=SchemaMeta):
         .. versionchanged:: 3.0.0a1
             Changed position of ``obj`` and ``attr``.
         """
-        pass
+        return get_value(obj, attr, default)
 
     @staticmethod
     def _call_and_store(getter_func, data, *, field_name, error_store, index=None):
@@ -320,7 +354,12 @@ class Schema(base.SchemaABC, metaclass=SchemaMeta):
         :param int index: Index of the item being validated, if validating a collection,
             otherwise `None`.
         """
-        pass
+        try:
+            value = getter_func(data)
+        except ValidationError as error:
+            error_store.store_error(error.messages, field_name, index=index)
+            return missing
+        return value
 
     def _serialize(self, obj: _T | typing.Iterable[_T], *, many: bool=False):
         """Serialize ``obj``.
@@ -332,7 +371,18 @@ class Schema(base.SchemaABC, metaclass=SchemaMeta):
         .. versionchanged:: 1.0.0
             Renamed from ``marshal``.
         """
-        pass
+        if many and obj is not None:
+            return [self._serialize(d, many=False) for d in obj]
+
+        ret = {}
+        for attr_name, field_obj in self.dump_fields.items():
+            value = field_obj.serialize(attr_name, obj, accessor=self.get_attribute)
+            if value is missing:
+                continue
+            key = field_obj.data_key if field_obj.data_key is not None else attr_name
+            ret[key] = value
+
+        return ret
 
     def dump(self, obj: typing.Any, *, many: bool | None=None):
         """Serialize an object to native Python data types according to this
@@ -351,7 +401,25 @@ class Schema(base.SchemaABC, metaclass=SchemaMeta):
         .. versionchanged:: 3.0.0rc9
             Validation no longer occurs upon serialization.
         """
-        pass
+        many = self.many if many is None else bool(many)
+        if many and obj is not None:
+            return [self.dump(d, many=False) for d in obj]
+
+        if self._hooks[(PRE_DUMP, False)]:
+            try:
+                obj = self._invoke_dump_processors(PRE_DUMP, obj, many=False)
+            except ValidationError as error:
+                raise error
+
+        result = self._serialize(obj, many=False)
+
+        if self._hooks[(POST_DUMP, False)]:
+            try:
+                result = self._invoke_dump_processors(POST_DUMP, result, obj=obj, many=False)
+            except ValidationError as error:
+                raise error
+
+        return result
 
     def dumps(self, obj: typing.Any, *args, many: bool | None=None, **kwargs):
         """Same as :meth:`dump`, except return a JSON-encoded string.
@@ -367,7 +435,8 @@ class Schema(base.SchemaABC, metaclass=SchemaMeta):
             A :exc:`ValidationError <marshmallow.exceptions.ValidationError>` is raised
             if ``obj`` is invalid.
         """
-        pass
+        serialized = self.dump(obj, many=many)
+        return self.opts.render_module.dumps(serialized, *args, **kwargs)
 
     def _deserialize(self, data: typing.Mapping[str, typing.Any] | typing.Iterable[typing.Mapping[str, typing.Any]], *, error_store: ErrorStore, many: bool=False, partial=None, unknown=RAISE, index=None) -> _T | list[_T]:
         """Deserialize ``data``.
@@ -385,7 +454,52 @@ class Schema(base.SchemaABC, metaclass=SchemaMeta):
             serializing a collection, otherwise `None`.
         :return: A dictionary of the deserialized data.
         """
-        pass
+        if many:
+            if not utils.is_collection(data):
+                error_store.store_error([self.error_messages["type"]], index=index)
+                return None
+            return [
+                self._deserialize(d, error_store=error_store, many=False,
+                                  partial=partial, unknown=unknown, index=idx)
+                for idx, d in enumerate(data)
+            ]
+
+        if not isinstance(data, Mapping):
+            error_store.store_error([self.error_messages["type"]], index=index)
+            return None
+
+        ret = {}
+        for attr_name, field_obj in self.load_fields.items():
+            key = field_obj.data_key if field_obj.data_key is not None else attr_name
+            raw_value = data.get(key, missing)
+            if raw_value is missing:
+                if field_obj.required:
+                    error_store.store_error(field_obj.error_messages["required"], key, index=index)
+                else:
+                    if field_obj.load_default is not missing:
+                        ret[attr_name] = field_obj.load_default
+                continue
+
+            validated_value = field_obj.deserialize(
+                raw_value,
+                attr=attr_name,
+                data=data,
+                partial=partial,
+                unknown=unknown,
+            )
+            if validated_value is not missing:
+                ret[attr_name] = validated_value
+
+        if unknown == RAISE:
+            unknown_fields = set(data) - set(self.load_fields)
+            if unknown_fields:
+                error_store.store_error(
+                    [self.error_messages["unknown"]],
+                    ", ".join(sorted(list(unknown_fields))),
+                    index=index,
+                )
+
+        return ret
 
     def load(self, data: typing.Mapping[str, typing.Any] | typing.Iterable[typing.Mapping[str, typing.Any]], *, many: bool | None=None, partial: bool | types.StrSequenceOrSet | None=None, unknown: str | None=None):
         """Deserialize a data structure to an object defined by this Schema's fields.
@@ -408,7 +522,9 @@ class Schema(base.SchemaABC, metaclass=SchemaMeta):
             A :exc:`ValidationError <marshmallow.exceptions.ValidationError>` is raised
             if invalid data are passed.
         """
-        pass
+        return self._do_load(
+            data, many=many, partial=partial, unknown=unknown, postprocess=True
+        )
 
     def loads(self, json_data: str, *, many: bool | None=None, partial: bool | types.StrSequenceOrSet | None=None, unknown: str | None=None, **kwargs):
         """Same as :meth:`load`, except it takes a JSON string as input.
@@ -431,7 +547,8 @@ class Schema(base.SchemaABC, metaclass=SchemaMeta):
             A :exc:`ValidationError <marshmallow.exceptions.ValidationError>` is raised
             if invalid data are passed.
         """
-        pass
+        data = self.opts.render_module.loads(json_data, **kwargs)
+        return self.load(data, many=many, partial=partial, unknown=unknown)
 
     def validate(self, data: typing.Mapping[str, typing.Any] | typing.Iterable[typing.Mapping[str, typing.Any]], *, many: bool | None=None, partial: bool | types.StrSequenceOrSet | None=None) -> dict[str, list[str]]:
         """Validate `data` against the schema, returning a dictionary of
@@ -448,7 +565,11 @@ class Schema(base.SchemaABC, metaclass=SchemaMeta):
 
         .. versionadded:: 1.1.0
         """
-        pass
+        try:
+            self._do_load(data, many=many, partial=partial, postprocess=False)
+        except ValidationError as exc:
+            return exc.messages
+        return {}
 
     def _do_load(self, data: typing.Mapping[str, typing.Any] | typing.Iterable[typing.Mapping[str, typing.Any]], *, many: bool | None=None, partial: bool | types.StrSequenceOrSet | None=None, unknown: str | None=None, postprocess: bool=True):
         """Deserialize `data`, returning the deserialized result.
@@ -467,30 +588,108 @@ class Schema(base.SchemaABC, metaclass=SchemaMeta):
         :param postprocess: Whether to run post_load methods..
         :return: Deserialized data
         """
-        pass
+        error_store = ErrorStore()
+        many = self.many if many is None else bool(many)
+        unknown = unknown or self.unknown
+        partial = self.partial if partial is None else partial
+        # Run preprocessors
+        if self._hooks[(PRE_LOAD, many)]:
+            try:
+                data = self._invoke_load_processors(PRE_LOAD, data, many=many, original_data=data)
+            except ValidationError as err:
+                error_store.store_error(err.messages)
+                raise ValidationError(error_store.errors)
+        
+        # Deserialize data
+        result = self._deserialize(data, error_store=error_store, many=many, partial=partial, unknown=unknown)
+        
+        # Run schema-level validation
+        if self._hooks[(VALIDATES_SCHEMA, many)]:
+            try:
+                self._invoke_validators(result, many=many, original_data=data, partial=partial)
+            except ValidationError as err:
+                error_store.store_error(err.messages)
+        
+        # Handle errors
+        if error_store.errors:
+            raise ValidationError(error_store.errors)
+        
+        # Run postprocessors
+        if postprocess and self._hooks[(POST_LOAD, many)]:
+            try:
+                result = self._invoke_load_processors(POST_LOAD, result, many=many, original_data=data)
+            except ValidationError as err:
+                raise ValidationError(err.messages)
+        
+        return result
 
     def _normalize_nested_options(self) -> None:
         """Apply then flatten nested schema options.
         This method is private API.
         """
-        pass
+        if self.only is not None:
+            # Apply the only option to nested fields.
+            self.__apply_nested_option('only', self.only, 'intersection')
+            # Remove the child field names from the only option.
+            self.only = [field.split('.', 1)[0] for field in self.only]
+        if self.exclude:
+            # Apply the exclude option to nested fields.
+            self.__apply_nested_option('exclude', self.exclude, 'union')
+            # Remove the child field names from the exclude option.
+            self.exclude = [field.split('.', 1)[0] for field in self.exclude]
 
     def __apply_nested_option(self, option_name, field_names, set_operation) -> None:
         """Apply nested options to nested fields"""
-        pass
+        # Split nested field names on the first dot.
+        nested_fields = [name.split('.', 1) for name in field_names if '.' in name]
+        # Partition the nested field names by parent field.
+        nested_options = {}
+        for parent, nested_names in nested_fields:
+            nested_options.setdefault(parent, []).append(nested_names)
+        # Apply the nested field options.
+        for key, value in self.declared_fields.items():
+            if isinstance(value, Nested):
+                if key in nested_options:
+                    setattr(value, option_name, (getattr(value, option_name) or set()) | set(nested_options[key]))
+                    value.schema._normalize_nested_options()
 
     def _init_fields(self) -> None:
         """Update self.fields, self.load_fields, and self.dump_fields based on schema options.
         This method is private API.
         """
-        pass
+        self.fields = {}
+        self.load_fields = {}
+        self.dump_fields = {}
+
+        for field_name, field_obj in self.declared_fields.items():
+            if self.only and field_name not in self.only:
+                continue
+            if field_name in self.exclude:
+                continue
+
+            self._bind_field(field_name, field_obj)
+            if not field_obj.dump_only:
+                self.load_fields[field_name] = field_obj
+            if not field_obj.load_only:
+                self.dump_fields[field_name] = field_obj
+
+        if self.load_only:
+            self.dump_fields = {
+                k: v for k, v in self.dump_fields.items() if k not in self.load_only
+            }
+        if self.dump_only:
+            self.load_fields = {
+                k: v for k, v in self.load_fields.items() if k not in self.dump_only
+            }
+
+        self.fields = {**self.dump_fields, **self.load_fields}
 
     def on_bind_field(self, field_name: str, field_obj: ma_fields.Field) -> None:
         """Hook to modify a field when it is bound to the `Schema`.
 
         No-op by default.
         """
-        pass
+        pass  # No-op by default
 
     def _bind_field(self, field_name: str, field_obj: ma_fields.Field) -> None:
         """Bind field to the schema, setting any necessary attributes on the
@@ -499,5 +698,12 @@ class Schema(base.SchemaABC, metaclass=SchemaMeta):
         Also set field load_only and dump_only values if field_name was
         specified in ``class Meta``.
         """
-        pass
+        field_obj.parent = self
+        field_obj.name = field_name
+        if field_name in self.load_only:
+            field_obj.load_only = True
+        if field_name in self.dump_only:
+            field_obj.dump_only = True
+        self.fields[field_name] = field_obj
+        self.on_bind_field(field_name, field_obj)
 BaseSchema = Schema
