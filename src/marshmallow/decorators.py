@@ -82,7 +82,13 @@ def validates(field_name: str) -> Callable[..., Any]:
 
     :param str field_name: Name of the field that the method validates.
     """
-    pass
+    def wrapper(fn):
+        @functools.wraps(fn)
+        def wrapped(*args, **kwargs):
+            return fn(*args, **kwargs)
+        wrapped.__marshmallow_hook__ = {VALIDATES: field_name}
+        return wrapped
+    return wrapper
 
 def validates_schema(fn: Callable[..., Any] | None=None, pass_many: bool=False, pass_original: bool=False, skip_on_field_errors: bool=True) -> Callable[..., Any]:
     """Register a schema-level validator.
@@ -104,7 +110,25 @@ def validates_schema(fn: Callable[..., Any] | None=None, pass_many: bool=False, 
         ``partial`` and ``many`` are always passed as keyword arguments to
         the decorated method.
     """
-    pass
+    if fn is None:
+        return functools.partial(
+            validates_schema,
+            pass_many=pass_many,
+            pass_original=pass_original,
+            skip_on_field_errors=skip_on_field_errors,
+        )
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        return fn(*args, **kwargs)
+
+    wrapper.__marshmallow_hook__ = {
+        (VALIDATES_SCHEMA, pass_many): {
+            'pass_original': pass_original,
+            'skip_on_field_errors': skip_on_field_errors,
+        }
+    }
+    return wrapper
 
 def pre_dump(fn: Callable[..., Any] | None=None, pass_many: bool=False) -> Callable[..., Any]:
     """Register a method to invoke before serializing an object. The method
@@ -117,7 +141,7 @@ def pre_dump(fn: Callable[..., Any] | None=None, pass_many: bool=False) -> Calla
     .. versionchanged:: 3.0.0
         ``many`` is always passed as a keyword arguments to the decorated method.
     """
-    pass
+    return set_hook(fn, (PRE_DUMP, pass_many))
 
 def post_dump(fn: Callable[..., Any] | None=None, pass_many: bool=False, pass_original: bool=False) -> Callable[..., Any]:
     """Register a method to invoke after serializing an object. The method
@@ -133,7 +157,7 @@ def post_dump(fn: Callable[..., Any] | None=None, pass_many: bool=False, pass_or
     .. versionchanged:: 3.0.0
         ``many`` is always passed as a keyword arguments to the decorated method.
     """
-    pass
+    return set_hook(fn, (POST_DUMP, pass_many), pass_original=pass_original)
 
 def pre_load(fn: Callable[..., Any] | None=None, pass_many: bool=False) -> Callable[..., Any]:
     """Register a method to invoke before deserializing an object. The method
@@ -147,7 +171,7 @@ def pre_load(fn: Callable[..., Any] | None=None, pass_many: bool=False) -> Calla
         ``partial`` and ``many`` are always passed as keyword arguments to
         the decorated method.
     """
-    pass
+    return set_hook(fn, (PRE_LOAD, pass_many))
 
 def post_load(fn: Callable[..., Any] | None=None, pass_many: bool=False, pass_original: bool=False) -> Callable[..., Any]:
     """Register a method to invoke after deserializing an object. The method
@@ -164,7 +188,7 @@ def post_load(fn: Callable[..., Any] | None=None, pass_many: bool=False, pass_or
         ``partial`` and ``many`` are always passed as keyword arguments to
         the decorated method.
     """
-    pass
+    return set_hook(fn, (POST_LOAD, pass_many), pass_original=pass_original)
 
 def set_hook(fn: Callable[..., Any] | None, key: tuple[str, bool] | str, **kwargs: Any) -> Callable[..., Any]:
     """Mark decorated function as a hook to be picked up later.
@@ -177,4 +201,11 @@ def set_hook(fn: Callable[..., Any] | None, key: tuple[str, bool] | str, **kwarg
     :return: Decorated function if supplied, else this decorator with its args
         bound.
     """
-    pass
+    def wrapper(func):
+        func.__marshmallow_hook__ = {key: kwargs or True}
+        return func
+
+    if fn is None:
+        return wrapper
+    else:
+        return wrapper(fn)
